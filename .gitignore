@@ -1,0 +1,5 @@
+node_modules/
+dist/
+
+# 單檔版是 build 產物，需要離線版時用 npm run build:single 重新產生
+TitanSlash.html

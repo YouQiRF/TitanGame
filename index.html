@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- viewport-fit=cover：瀏海機把畫布延伸到整個螢幕；禁縮放：雙指/雙擊不要把遊戲畫面放大 -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>Titan Slash</title>
+    <meta
+      name="description"
+      content="TypeScript + Canvas 手工打造的 Boss Rush 原型：拉得越遠、傷害越高，斬擊位移的無敵幀是唯一的閃避手段。"
+    />
+    <meta name="theme-color" content="#08080a" />
+
+    <!-- 分享到 104／LINE／Slack 時的連結預覽 -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Titan Slash — 網頁 Boss Rush 原型" />
+    <meta
+      property="og:description"
+      content="TypeScript + Canvas 手工打造的 Boss Rush 原型，電腦鍵鼠與手機觸控皆可遊玩。"
+    />
+
+    <!-- 從主畫面開啟時以全螢幕執行 -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #08080a;
+        /* 手機：關掉橡皮筋回彈、長按選字與點擊highlight，這些都會打斷遊玩 */
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-tap-highlight-color: transparent;
+        -webkit-touch-callout: none;
+      }
+      body {
+        /* 固定住版面，避免 iOS Safari 的網址列縮放連帶把畫布捲走 */
+        position: fixed;
+        inset: 0;
+      }
+      #game {
+        display: block;
+        width: 100%;
+        height: 100%;
+        cursor: none;
+        touch-action: none;
+      }
+      /* 觸控裝置沒有游標可藏，讓系統自行決定即可 */
+      @media (pointer: coarse) {
+        #game {
+          cursor: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
