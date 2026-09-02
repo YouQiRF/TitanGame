@@ -2,7 +2,7 @@
 
 網頁 Boss Rush 原型。零遊戲引擎、零執行期相依套件，只有 TypeScript + Canvas 2D。
 
-**▶ 立刻遊玩：** <!-- PLAY_URL -->（電腦鍵鼠、手機觸控皆可）
+**▶ 立刻遊玩：https://youqirf.github.io/TitanGame/** （電腦鍵鼠、手機觸控皆可）
 
 ---
 

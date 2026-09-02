@@ -1,5 +1,6 @@
 # 推上 main 就自動 build 並發佈到 GitHub Pages。
-# 需要在 Settings → Pages 把 Source 設成 "GitHub Actions"（deploy.sh 會自動設定）。
+# configure-pages 的 enablement 會順手把 repo 的 Pages 打開並設成 GitHub Actions 來源，
+# 所以不需要先進 Settings → Pages 手動設定。
 name: Deploy to GitHub Pages
 
 on:
@@ -31,6 +32,9 @@ jobs:
       - run: npm run build
 
       - uses: actions/configure-pages@v5
+        with:
+          # 第一次部署時自動啟用 Pages，不必先去 Settings 開
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
