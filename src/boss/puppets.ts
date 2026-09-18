@@ -11,6 +11,7 @@
  */
 
 import { T } from '../tuning.ts';
+import { Arena } from '../arena.ts';
 import { fx } from '../fx.ts';
 import type { Player } from '../player.ts';
 import { add, clamp, dist, distPointSeg, norm, sub, type Vec } from '../core/vec.ts';
@@ -34,11 +35,14 @@ class SpecialPuppet {
   private life: number;
   dead = false;
   private orbit?: OrbitConfig;
+  /** 被斬中回復的體力；省略時用 `T.puppeteer.special.staminaRestore` */
+  private restore?: number;
 
-  constructor(pos: Vec, life: number, orbit?: OrbitConfig) {
+  constructor(pos: Vec, life: number, orbit?: OrbitConfig, restore?: number) {
     this.pos = { ...pos };
     this.life = life;
     this.orbit = orbit;
+    this.restore = restore;
   }
 
   update(dt: number, player: Player): void {
@@ -106,7 +110,7 @@ class SpecialPuppet {
     const cfg = T.puppeteer.special;
     if (distPointSeg(this.pos, a, b) < cfg.radius + T.slash.hitRadius) {
       this.dead = true;
-      player.restoreStamina(cfg.staminaRestore);
+      player.restoreStamina(this.restore ?? cfg.staminaRestore);
       fx.ring(this.pos, { r0: 6, r1: 70, life: 0.34, width: 6, col: [140, 235, 205] });
       fx.spark(this.pos, 20, { speed: 280, life: 0.42, size: 3, col: [150, 240, 210] });
       fx.flash(this.pos, 60, 0.2, [170, 245, 220]);
@@ -361,8 +365,8 @@ export class Puppets {
   private pulses: PulsePuppet[] = [];
   private orbits: OrbitHazard[] = [];
 
-  spawnSpecial(pos: Vec, life: number, orbit?: OrbitConfig): void {
-    this.specials.push(new SpecialPuppet(pos, life, orbit));
+  spawnSpecial(pos: Vec, life: number, orbit?: OrbitConfig, restore?: number): void {
+    this.specials.push(new SpecialPuppet(pos, life, orbit, restore));
   }
 
   spawnRay(origin: Vec, angle: number, damage: number): void {
@@ -398,6 +402,42 @@ export class Puppets {
     }
   }
 
+  /**
+   * 終局處決的行星軌道：一圈球繞著她公轉，**固定每 `specialEvery` 顆有一顆**是
+   * 可以斬來回體力的特殊球（不是隨機一顆）——玩家得看得出補給點的分布規律，
+   * 才有辦法規劃「先跳到哪顆球旁邊、回完體力再往內跳」。
+   *
+   * @param skip 回傳 true 的位置不生成球（玩家起點的安全區用），留下的缺口會跟著軌道一起公轉
+   * @returns 這一圈實際生成的球數
+   */
+  spawnPlanetRing(
+    center: Vec,
+    radius: number,
+    count: number,
+    angularSpeed: number,
+    damage: number,
+    life: number,
+    baseAngle: number,
+    specialEvery: number,
+    skip: (p: Vec) => boolean,
+    staminaPerBall: number,
+  ): number {
+    let made = 0;
+    for (let i = 0; i < count; i++) {
+      const angle = baseAngle + (i / count) * Math.PI * 2;
+      const pos = add(center, { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius });
+      if (skip(pos)) continue;
+      made++;
+
+      if (i % specialEvery === 0) {
+        this.spawnSpecial(pos, life, { center: { ...center }, radius, angularSpeed, angle }, staminaPerBall);
+      } else {
+        this.orbits.push(new OrbitHazard(center, radius, angle, angularSpeed, damage, life));
+      }
+    }
+    return made;
+  }
+
   /** 斬擊優先判定特殊傀儡；命中就消滅並回體力，回傳是否命中（main.ts 命中判定用） */
   /** 斬擊路徑上所有特殊傀儡都算數，不是只吃第一個——一斬可以連續回好幾次體力 */
   trySlashHeal(a: Vec, b: Vec, player: Player): boolean {
@@ -420,17 +460,37 @@ export class Puppets {
     this.orbits = this.orbits.filter((o) => !o.dead);
   }
 
+  /**
+   * 裁切到場地範圍內再畫。
+   *
+   * 終局處決的行星軌道以場邊的本體為圓心，外圈半徑遠大於場地，
+   * 有相當數量的球在任一瞬間是落在牆外的——它們照樣公轉、照樣會轉回場內，
+   * 但不該被畫出來，否則玩家會看到石牆外面飄著一堆球。
+   */
+  private clipped(ctx: CanvasRenderingContext2D, body: () => void): void {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, Arena.w, Arena.h);
+    ctx.clip();
+    body();
+    ctx.restore();
+  }
+
   /** 地面層：路徑/引信範圍這類貼地的東西 */
   drawGround(ctx: CanvasRenderingContext2D): void {
-    for (const r of this.rays) r.draw(ctx);
-    for (const s of this.specials) s.drawGround(ctx);
+    this.clipped(ctx, () => {
+      for (const r of this.rays) r.draw(ctx);
+      for (const s of this.specials) s.drawGround(ctx);
+    });
   }
 
   /** 實體層：傀儡本體 */
   draw(ctx: CanvasRenderingContext2D): void {
-    for (const p of this.pulses) p.draw(ctx);
-    for (const o of this.orbits) o.draw(ctx);
-    for (const s of this.specials) s.draw(ctx);
+    this.clipped(ctx, () => {
+      for (const p of this.pulses) p.draw(ctx);
+      for (const o of this.orbits) o.draw(ctx);
+      for (const s of this.specials) s.draw(ctx);
+    });
   }
 
   /** 清空這一招灑出的所有危險物與特殊傀儡（招式結束/中斷時呼叫） */

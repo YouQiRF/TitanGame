@@ -128,7 +128,10 @@ export class Puppeteer {
   /** 終局處決：是否已經觸發過（鎖血用）、下一幀是否要強制切進處決序列、安全圓路徑 */
   private executeTriggered = false;
   private executePending = false;
-  private executePath: Vec[] = [];
+  /** 行星軌道的半徑與角速度，供繪製軌道線用 */
+  private executeRings: Array<{ radius: number; speed: number }> = [];
+  /** 玩家起點的安全區中心（該範圍內不生成球） */
+  private executeSafeZone: Vec | null = null;
 
   private time = 0;
 
@@ -729,16 +732,16 @@ export class Puppeteer {
 
   private updateTelegraphExecute(dt: number, player: Player, camera: Camera): void {
     if (this.stateT >= T.puppeteer.execute.telegraph) {
-      // 她跳到場地正中央
-      this.pos = { x: Arena.w / 2, y: Arena.h / 2 };
+      // 她跳到場地**最右邊**，玩家被轟到**最左邊**——
+      // 兩人隔著整個場地對峙，中間全是她的行星軌道
+      this.pos = { x: Arena.w, y: Arena.h / 2 };
+      Arena.confine(this.pos, T.puppeteer.radius);
 
-      // 玩家沿「本體（現在在中心）→玩家」方向直線推到牆邊
-      const away = sub(player.pos, this.pos);
-      const pushDir = away.x === 0 && away.y === 0 ? { x: 0, y: 1 } : norm(away);
-      const pushed = add(this.pos, scale(pushDir, Math.max(Arena.w, Arena.h)));
-      Arena.confine(pushed, T.player.radius);
-      player.pos.x = pushed.x;
-      player.pos.y = pushed.y;
+      player.pos.x = 0;
+      player.pos.y = Arena.h / 2;
+      Arena.confine(player.pos, T.player.radius);
+      player.vel.x = 0;
+      player.vel.y = 0;
 
       camera.shake(30, 0.55);
       fx.ring(player.pos, { r0: 10, r1: 140, life: 0.4, width: 8, col: [220, 160, 240] });
@@ -750,51 +753,52 @@ export class Puppeteer {
     }
   }
 
-  /** 建構安全圓路徑，鋪滿全場危險物只留安全圓，路徑上（除玩家起點外）擺特殊傀儡 */
+  /**
+   * 建構行星軌道系統：一圈圈同心軌道繞著她公轉，玩家從最左邊一層層往內穿越。
+   *
+   * 幾個刻意的性質：
+   *  - **圈距 `ringGap` 小於斬擊最遠距離**，所以「從這一圈跳到下一圈」永遠做得到，
+   *    連通性由參數保證，不需要搜尋路徑
+   *  - 球數由半徑換算（固定弧長間距），外圈球多內圈球少，但**縫隙寬度到處一樣**
+   *  - 相鄰圈反向、外圈轉得慢，每一層的縫隙都在往不同方向跑，
+   *    玩家得逐層重新抓時機，不能一路直線衝
+   *  - 落在玩家起點安全區內的位置直接不生成，留下的缺口會跟著軌道公轉
+   *  - 軌道之間是**空的**：危險只長在軌道上，不再鋪滿全場
+   */
   private buildExecuteField(player: Player): void {
     const cfg = T.puppeteer.execute;
-    this.executePath = this.buildExecutePath(player.pos, this.pos);
-    const inSafeZone = (p: Vec) => this.executePath.some((c) => dist(p, c) < cfg.safeRadius);
+    this.executeRings = [];
 
-    for (let gx = cfg.gridSpacing / 2; gx < Arena.w; gx += cfg.gridSpacing) {
-      for (let gy = cfg.gridSpacing / 2; gy < Arena.h; gy += cfg.gridSpacing) {
-        const p: Vec = { x: gx, y: gy };
-        if (inSafeZone(p)) continue;
-        this.puppets.spawnPulse(p, cfg.infiniteLife);
-      }
+    const spawn = { x: player.pos.x, y: player.pos.y };
+    const inSafeZone = (p: Vec) => dist(p, spawn) < cfg.safeRadius;
+
+    for (let i = 0; i < cfg.ringCount; i++) {
+      const radius = cfg.innerRadius + i * cfg.ringGap;
+      const count = Math.max(cfg.minPerRing, Math.round((Math.PI * 2 * radius) / cfg.arcSpacing));
+      // 外圈轉得慢（像外側行星週期長），相鄰圈反向
+      const speed =
+        cfg.innerSpeed *
+        Math.pow(cfg.speedFalloff, i) *
+        (cfg.alternateDirection && i % 2 === 1 ? -1 : 1);
+      const baseAngle = Math.random() * Math.PI * 2;
+
+      this.puppets.spawnPlanetRing(
+        this.pos,
+        radius,
+        count,
+        speed,
+        this.dmg(cfg.ballDamage),
+        cfg.infiniteLife,
+        baseAngle,
+        cfg.specialEvery,
+        inSafeZone,
+        cfg.staminaPerBall,
+      );
+
+      this.executeRings.push({ radius, speed });
     }
 
-    // 安全圓（除了玩家起點跟本體所在的最後一點）都放一隻特殊傀儡
-    for (let i = 1; i < this.executePath.length - 1; i++) {
-      this.puppets.spawnSpecial(this.executePath[i], cfg.infiniteLife);
-    }
-  }
-
-  /**
-   * 從玩家目前位置到本體位置，用固定步距逐步前進、加一點隨機橫向偏移，
-   * 形成一串安全圓中心點——每一步都保證在斬擊可達範圍內，連通性天生成立。
-   */
-  private buildExecutePath(from: Vec, to: Vec): Vec[] {
-    const cfg = T.puppeteer.execute;
-    const path: Vec[] = [{ x: from.x, y: from.y }];
-    const total = dist(from, to);
-    const steps = Math.max(1, Math.ceil(total / cfg.stepDist));
-    const dir = norm(sub(to, from));
-    const perp: Vec = { x: -dir.y, y: dir.x };
-
-    for (let i = 1; i <= steps; i++) {
-      if (i === steps) {
-        path.push({ x: to.x, y: to.y });
-        break;
-      }
-      const t = i / steps;
-      const base: Vec = { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t };
-      const off = (Math.random() * 2 - 1) * cfg.jitter;
-      const wp = add(base, scale(perp, off));
-      Arena.confine(wp, cfg.safeRadius);
-      path.push(wp);
-    }
-    return path;
+    this.executeSafeZone = spawn;
   }
 
   /** 斬中本體那一刻：清場、定格，讓 main.ts 的處決演出接手 */
@@ -895,7 +899,8 @@ export class Puppeteer {
     this.phaseIntroShakeT = 0;
     this.executeTriggered = false;
     this.executePending = false;
-    this.executePath = [];
+    this.executeRings = [];
+    this.executeSafeZone = null;
     this.time = 0;
     this.puppets.clear();
   }
@@ -1109,18 +1114,38 @@ export class Puppeteer {
     ctx.fill();
   }
 
-  /** 終局處決的安全圓標記：持續顯示整條路徑，讓玩家看得懂該往哪跳 */
+  /**
+   * 終局處決的場地標記：每條行星軌道畫一圈細線，玩家起點畫一塊安全區。
+   *
+   * 軌道線是有功能的，不是裝飾——玩家要判斷「下一圈在哪、縫隙轉到哪了」，
+   * 沒有線就只看得到一堆散落的球，讀不出這是一層一層的結構。
+   */
   private executeFieldTelegraph(ctx: CanvasRenderingContext2D): void {
-    const r = T.puppeteer.execute.safeRadius;
     const pulse = 0.6 + 0.4 * Math.sin(this.time * 3);
-    for (const p of this.executePath) {
-      ctx.fillStyle = `rgba(170,255,210,${0.06 * pulse})`;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-      ctx.fill();
 
-      ctx.strokeStyle = `rgba(170,255,210,${0.4 + pulse * 0.3})`;
-      ctx.lineWidth = 3;
+    // 軌道半徑遠大於場地，裁切掉牆外的部分才不會把線畫到石牆上
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, Arena.w, Arena.h);
+    ctx.clip();
+    for (const ring of this.executeRings) {
+      ctx.strokeStyle = `rgba(190,140,220,${0.12 + 0.06 * pulse})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(this.pos.x, this.pos.y, ring.radius, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // 玩家起點的安全區：這裡不會生成球（轉過來的球仍然會傷人，所以只是起步的喘息）
+    if (this.executeSafeZone) {
+      const r = T.puppeteer.execute.safeRadius;
+      ctx.fillStyle = `rgba(170,255,210,${0.05 * pulse})`;
+      ctx.beginPath();
+      ctx.arc(this.executeSafeZone.x, this.executeSafeZone.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = `rgba(170,255,210,${0.25 + pulse * 0.2})`;
+      ctx.lineWidth = 2;
       ctx.stroke();
     }
   }
