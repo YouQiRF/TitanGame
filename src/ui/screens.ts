@@ -212,6 +212,7 @@ export class TitleScreen {
           ['　　　', '拉得越遠 → 傷害越高，體力消耗越大'],
           ['滑鼠右鍵', '取消蓄力，不出刀也不耗體力'],
           ['　或把游標移回自己身上', '放開即取消，效果相同'],
+          ['E s c', '暫停並詢問是否返回標題'],
         ];
 
     // 手機橫向大約 700–900 寬，下限跟著視窗縮，免得說明框超出畫面
@@ -390,5 +391,123 @@ export function drawOutcome(
   }
 
   ctx.globalAlpha = 1;
+  ctx.textAlign = 'left';
+}
+
+// ── 返回標題的確認面板 ──────────────────────────────────
+
+/** 確認面板的兩個選項 */
+export type QuitChoice = 'quit' | 'resume';
+
+interface QuitButtonRect {
+  key: QuitChoice;
+  label: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** 面板版面：draw 與 hitTest 共用，保證畫到哪就點得到哪 */
+function quitButtons(w: number, h: number): QuitButtonRect[] {
+  const bw = clamp(w * 0.2, 150, 210);
+  const bh = 52;
+  const gap = 18;
+  const y = h / 2 + 26;
+  const x0 = w / 2 - (bw * 2 + gap) / 2;
+  return [
+    // 「繼續遊戲」放左邊、預設視線落點在它上面——誤觸 Esc 的人想要的是回去打，
+    // 破壞性的那個選項不該是最順手的那個
+    { key: 'resume', label: '繼續遊戲', x: x0, y, w: bw, h: bh },
+    { key: 'quit', label: '返回標題', x: x0 + bw + gap, y, w: bw, h: bh },
+  ];
+}
+
+/** 點擊座標落在哪顆確認按鈕上；沒點中回傳 null */
+export function hitTestQuitButton(
+  mx: number,
+  my: number,
+  w: number,
+  h: number,
+): QuitChoice | null {
+  for (const b of quitButtons(w, h)) {
+    if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) return b.key;
+  }
+  return null;
+}
+
+/**
+ * 「返回標題？」確認覆蓋層。
+ *
+ * 按 Esc 不再直接把人丟回標題——這一場的進度沒有存檔，誤觸一次就全沒了。
+ * 面板出現時遊戲是暫停的（見 main.ts），所以停在這裡猶豫不會被打死。
+ *
+ * @param fade  0..1 淡入進度
+ * @param inRun 戰鬥還在進行中（未結算）——只有這時候離開才真的會損失進度
+ */
+export function drawQuitConfirm(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  fade: number,
+  touch = false,
+  inRun = true,
+): void {
+  const a = clamp(fade, 0, 1);
+
+  ctx.fillStyle = `rgba(6,7,11,${a * 0.78})`;
+  ctx.fillRect(0, 0, w, h);
+
+  const cx = w / 2;
+  const cy = h / 2;
+
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.textAlign = 'center';
+
+  const size = clamp(w * 0.032, 26, 42);
+  ctx.font = `800 ${size}px ${FONT}`;
+  ctx.letterSpacing = '6px';
+  ctx.fillStyle = '#e8edf7';
+  ctx.fillText('返 回 標 題 ？', cx, cy - 46);
+  ctx.letterSpacing = '0px';
+
+  // 結算畫面已經沒有進度可以損失了，不要嚇人
+  if (inRun) {
+    ctx.font = `400 14px ${FONT}`;
+    ctx.fillStyle = 'rgba(200,206,222,0.7)';
+    ctx.fillText('這一場的進度會消失，無法接續', cx, cy - 12);
+  }
+
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 380);
+
+  ctx.textBaseline = 'middle';
+  for (const b of quitButtons(w, h)) {
+    const danger = b.key === 'quit';
+    ctx.fillStyle = danger ? 'rgba(226,86,95,0.10)' : 'rgba(255,255,255,0.06)';
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.strokeStyle = danger
+      ? `rgba(226,86,95,${0.4 + pulse * 0.25})`
+      : `rgba(255,215,160,${0.4 + pulse * 0.3})`;
+    ctx.lineWidth = 1.4;
+    ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w - 1, b.h - 1);
+
+    ctx.font = `700 15px ${FONT}`;
+    ctx.fillStyle = danger ? 'rgba(255,190,190,0.95)' : 'rgba(255,235,205,0.95)';
+    ctx.letterSpacing = '2px';
+    ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2);
+    ctx.letterSpacing = '0px';
+  }
+  ctx.textBaseline = 'alphabetic';
+
+  if (!touch) {
+    ctx.font = `600 13px ${FONT}`;
+    ctx.fillStyle = `rgba(190,198,216,${0.45 + pulse * 0.35})`;
+    ctx.letterSpacing = '2px';
+    ctx.fillText('按 Esc 繼續遊戲　·　按 Enter 返回標題', cx, cy + 108);
+    ctx.letterSpacing = '0px';
+  }
+
+  ctx.restore();
   ctx.textAlign = 'left';
 }

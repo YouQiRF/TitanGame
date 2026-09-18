@@ -23,7 +23,14 @@ import { Player } from './player.ts';
 import { Guardian } from './boss/guardian.ts';
 import { Puppeteer } from './boss/puppeteer.ts';
 import { HUD } from './ui/hud.ts';
-import { TitleScreen, drawOutcome, hitTestOutcomeButton, type Chapter } from './ui/screens.ts';
+import {
+  TitleScreen,
+  drawOutcome,
+  drawQuitConfirm,
+  hitTestOutcomeButton,
+  hitTestQuitButton,
+  type Chapter,
+} from './ui/screens.ts';
 import { drawRotateHint, drawTouchControls, touchMaxDrag, updateTouchHints } from './ui/touch.ts';
 import { Vignette } from './ui/vignette.ts';
 import { planSlash, type SlashPlan } from './slash.ts';
@@ -75,6 +82,14 @@ let executionT = 0;
 
 /** 上一幀 Boss 是否正在播演出，用來偵測「剛進入演出」這一個邊緣事件 */
 let wasCinematic = false;
+
+/**
+ * 「返回標題？」確認面板。
+ * 按 Esc 不再直接離開——這一場沒有存檔，誤觸一次就全沒了。
+ * 面板開著的時候遊戲暫停（dt = 0），停在這裡猶豫不會被打死。
+ */
+let confirmQuit = false;
+let confirmQuitT = 0;
 
 /** 部位破壞的橫幅提示 */
 let bannerText = '';
@@ -133,12 +148,18 @@ function startRun(nextChapter: Chapter): void {
   bannerSub = '';
   bannerT = 0;
   wasCinematic = false;
+  confirmQuit = false;
+  confirmQuitT = 0;
 }
 
 function toTitle(): void {
   scene = 'title';
   outcome = 'none';
   outcomeT = 0;
+  confirmQuit = false;
+  confirmQuitT = 0;
+  // 剛剛點「返回標題」的那一下若還按著，別讓它一進標題就被當成選章節
+  input.resetCharge();
 }
 
 // ── 瞄準向量 ──────────────────────────────────────────────
@@ -211,7 +232,7 @@ function frame(now: number): void {
 
   // 選單類畫面沒有「移動」可言，整個螢幕都當滑鼠用，
   // 章節入口與結算按鈕才不會因為落在左半屏而被虛擬搖桿吃掉。
-  input.uiPointerMode = scene === 'title' || outcome !== 'none';
+  input.uiPointerMode = scene === 'title' || outcome !== 'none' || confirmQuit;
 
   if (scene === 'title') {
     updateTitle(rawDt);
@@ -260,13 +281,44 @@ function updatePlaying(rawDt: number): void {
 
   const finished = outcome !== 'none';
 
-  if (finished && outcomeT > 0.5) {
+  // ── 返回標題的確認面板 ──
+  // 面板開著時整場暫停，而且吃掉所有其他輸入：猶豫的時候不該還在被打，
+  // 也不該一邊選一邊不小心出刀
+  if (confirmQuit) {
+    confirmQuitT = Math.min(1, confirmQuitT + rawDt / 0.16);
+
+    if (input.consumeKeyPress('escape')) {
+      confirmQuit = false;
+      input.resetCharge();
+    } else if (input.consumeKeyPress('enter')) {
+      toTitle();
+      return;
+    } else if (input.consumeChargeRelease()) {
+      const picked = hitTestQuitButton(input.mouse.x, input.mouse.y, viewW, viewH);
+      if (picked === 'quit') {
+        toTitle();
+        return;
+      }
+      if (picked === 'resume') {
+        confirmQuit = false;
+        input.resetCharge();
+      }
+    }
+  } else {
+    confirmQuitT = 0;
+    // 演出期間也允許開面板——那段時間本來就不能操作，更需要一個退出的方法
+    if (input.consumeKeyPress('escape')) {
+      confirmQuit = true;
+      // 開面板時若正按著左鍵，清掉蓄力，關掉面板的瞬間才不會補出一刀
+      input.resetCharge();
+    }
+  }
+
+  const paused = confirmQuit;
+
+  if (finished && outcomeT > 0.5 && !paused) {
     if (input.consumeKeyPress('r')) {
       startRun(chapter);
-      return;
-    }
-    if (input.consumeKeyPress('escape')) {
-      toTitle();
       return;
     }
     // 觸控沒有鍵盤，改點結算畫面上的兩顆按鈕
@@ -294,7 +346,7 @@ function updatePlaying(rawDt: number): void {
   }
   wasCinematic = locked;
 
-  const wantAim = input.chargeDown && player.canAct && !finished && !locked;
+  const wantAim = input.chargeDown && player.canAct && !finished && !locked && !paused;
   player.aiming = wantAim;
 
   const plan: SlashPlan = wantAim
@@ -303,11 +355,11 @@ function updatePlaying(rawDt: number): void {
 
   // 右鍵取消：跟「游標收回取消區」同樣的結果（不出刀、不耗體力），
   // 差別只在不必把游標拉回角色身上，瞄到一半想退出時反應更快
-  if (input.consumeChargeCancel() && !finished && player.canAct) {
+  if (input.consumeChargeCancel() && !finished && !paused && player.canAct) {
     cancelFx();
   }
 
-  if (!finished && !locked) {
+  if (!finished && !locked && !paused) {
     // 放開左鍵 → 斬擊，除非游標停在取消區內
     if (input.consumeChargeRelease() && player.canAct) {
       const p = player.plan(aimVec, cursorDist);
@@ -329,6 +381,8 @@ function updatePlaying(rawDt: number): void {
     hitStopT = Math.max(0, hitStopT - rawDt);
     dt = 0;
   }
+  // 確認面板開著 = 整場定格（特效與 Boss 也一起停，不只是玩家不能動）
+  if (paused) dt = 0;
 
   // 處決演出：用真實時間倒數（不受 timeScale 影響），鏡頭放大倍率沿正弦曲線先放大再收回
   if (executionT > 0) {
@@ -339,7 +393,7 @@ function updatePlaying(rawDt: number): void {
     camera.execZoomMult = 1;
   }
 
-  if (!finished) runTime += rawDt;
+  if (!finished && !paused) runTime += rawDt;
   if (bannerT > 0) bannerT = Math.max(0, bannerT - rawDt);
 
   // ── 更新 ──
@@ -570,6 +624,10 @@ function render(plan: SlashPlan): void {
       text.defeatSub,
       input.touchMode,
     );
+  }
+
+  if (confirmQuit) {
+    drawQuitConfirm(ctx, viewW, viewH, clamp(confirmQuitT, 0, 1), input.touchMode, outcome === 'none');
   }
 
   // 觸控畫搖桿與拖曳板，鍵鼠畫準心——手指底下畫游標是看不到的
