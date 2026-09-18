@@ -10,20 +10,34 @@ export const Arena = {
   w: T.arena.w,
   h: T.arena.h,
 
-  /** 把一個半徑為 r 的圓形實體限制在場內，回傳是否撞到牆 */
+  /**
+   * 把一個半徑為 r 的圓形實體限制在場內，回傳是否撞到牆。
+   *
+   * 邊界是**牆的內緣**（`wallThickness`），不是場地的外框座標——
+   * 少算牆厚的話，貼邊的實體會有整整一個牆厚的身體埋進石牆裡，
+   * 玩家會看到自己「跑到場邊外面」。被強制位移到牆邊的招式（招式d 的推擠、
+   * 終局處決的定位）最容易看出這個差別。
+   */
   confine(pos: Vec, r: number): boolean {
+    const t = T.arena.wallThickness;
     let hit = false;
-    const nx = clamp(pos.x, r, Arena.w - r);
-    const ny = clamp(pos.y, r, Arena.h - r);
+    const nx = clamp(pos.x, t + r, Arena.w - t - r);
+    const ny = clamp(pos.y, t + r, Arena.h - t - r);
     if (nx !== pos.x || ny !== pos.y) hit = true;
     pos.x = nx;
     pos.y = ny;
     return hit;
   },
 
-  /** 圓心是否已貼到牆（用於衝撞撞牆判定，留 1px 容差） */
+  /** 圓心是否已貼到牆（用於衝撞撞牆判定，留 1px 容差）——邊界同樣算牆的內緣 */
   touchingWall(pos: Vec, r: number): boolean {
-    return pos.x <= r + 1 || pos.x >= Arena.w - r - 1 || pos.y <= r + 1 || pos.y >= Arena.h - r - 1;
+    const t = T.arena.wallThickness;
+    return (
+      pos.x <= t + r + 1 ||
+      pos.x >= Arena.w - t - r - 1 ||
+      pos.y <= t + r + 1 ||
+      pos.y >= Arena.h - t - r - 1
+    );
   },
 
   draw(ctx: CanvasRenderingContext2D): void {

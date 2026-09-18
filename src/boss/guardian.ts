@@ -158,6 +158,22 @@ export class Guardian {
     return this.rage / this.parts.list.length;
   }
 
+  // ── 演出介面 ────────────────────────────────────────────
+  // 守衛沒有過場演出，但 main.ts 對兩隻 Boss 一視同仁，
+  // 所以照樣提供這三個欄位，永遠回報「沒有演出在進行」。
+
+  get cinematicFocus(): Vec | null {
+    return null;
+  }
+
+  get inputLocked(): boolean {
+    return false;
+  }
+
+  get cinematicProgress(): number {
+    return 0;
+  }
+
   /** 攻擊傷害倍率 */
   private get dmgMult(): number {
     return 1 + this.rage * R.damagePerLevel;

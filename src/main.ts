@@ -25,6 +25,7 @@ import { Puppeteer } from './boss/puppeteer.ts';
 import { HUD } from './ui/hud.ts';
 import { TitleScreen, drawOutcome, hitTestOutcomeButton, type Chapter } from './ui/screens.ts';
 import { drawRotateHint, drawTouchControls, touchMaxDrag, updateTouchHints } from './ui/touch.ts';
+import { Vignette } from './ui/vignette.ts';
 import { planSlash, type SlashPlan } from './slash.ts';
 import { add, clamp, damp, len, scale, sub, type Vec } from './core/vec.ts';
 
@@ -42,6 +43,12 @@ const FONT = '"Segoe UI", "Microsoft JhengHei", system-ui, sans-serif';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d', { alpha: false })!;
+
+// 三層全螢幕暗角，形狀固定、只有強度每幀在變，所以預先渲染成貼圖重複使用
+// （見 ui/vignette.ts——這是後期階段掉幀的主因）
+const bulletTimeVignette = new Vignette(0.18, 0.72, [8, 12, 28], 0.62);
+const rageVignette = new Vignette(0.36, 0.75, [200, 40, 20], 0.3);
+const lowHpVignette = new Vignette(0.3, 0.7, [180, 20, 30], 0.4);
 
 const input = new Input(canvas);
 const camera = new Camera();
@@ -65,6 +72,9 @@ let hitStopT = 0;
 
 /** 傀儡師終局處決的演出倒數（>0 時強制壓低時間縮放、鏡頭放大） */
 let executionT = 0;
+
+/** 上一幀 Boss 是否正在播演出，用來偵測「剛進入演出」這一個邊緣事件 */
+let wasCinematic = false;
 
 /** 部位破壞的橫幅提示 */
 let bannerText = '';
@@ -122,6 +132,7 @@ function startRun(nextChapter: Chapter): void {
   bannerText = '';
   bannerSub = '';
   bannerT = 0;
+  wasCinematic = false;
 }
 
 function toTitle(): void {
@@ -272,14 +283,31 @@ function updatePlaying(rawDt: number): void {
     }
   }
 
-  const wantAim = input.chargeDown && player.canAct && !finished;
+  // 過場演出期間玩家完全無法動作：不能走、不能瞄準、不能出刀
+  const locked = boss.inputLocked;
+  if (locked && !wasCinematic) {
+    bannerText = '最 終 階 段';
+    bannerSub = '傀儡師卸下了偽裝';
+    bannerT = 1.8;
+    // 演出開始時若正按著左鍵，清掉蓄力，避免演出結束的瞬間補出一刀
+    input.resetCharge();
+  }
+  wasCinematic = locked;
+
+  const wantAim = input.chargeDown && player.canAct && !finished && !locked;
   player.aiming = wantAim;
 
   const plan: SlashPlan = wantAim
     ? player.plan(aimVec, cursorDist)
     : planSlash(player.stamina, { x: 0, y: 0 }, Infinity);
 
-  if (!finished) {
+  // 右鍵取消：跟「游標收回取消區」同樣的結果（不出刀、不耗體力），
+  // 差別只在不必把游標拉回角色身上，瞄到一半想退出時反應更快
+  if (input.consumeChargeCancel() && !finished && player.canAct) {
+    cancelFx();
+  }
+
+  if (!finished && !locked) {
     // 放開左鍵 → 斬擊，除非游標停在取消區內
     if (input.consumeChargeRelease() && player.canAct) {
       const p = player.plan(aimVec, cursorDist);
@@ -317,7 +345,7 @@ function updatePlaying(rawDt: number): void {
   // ── 更新 ──
   // 特效吃已縮放的 dt：子彈時間裡會慢下來，命中頓幀時會定格
   fx.update(dt);
-  player.update(dt, input.moveAxis(), aimWorld);
+  player.update(dt, locked ? { x: 0, y: 0 } : input.moveAxis(), aimWorld);
   boss.update(dt, player, camera);
   separatePlayerFromBoss();
 
@@ -466,7 +494,23 @@ function updatePlaying(rawDt: number): void {
     outcomeT += rawDt;
   }
 
-  camera.update(player.pos, sub(aimWorld, player.pos), rawDt);
+  // 鏡頭：平常跟玩家；過場演出時平滑移到 Boss 身上，結束再平滑交還。
+  // 前後各留一段過渡，鏡頭才不會瞬間跳過去
+  const focus = boss.cinematicFocus;
+  let camTarget = player.pos;
+  let camLook = sub(aimWorld, player.pos);
+  if (focus) {
+    const bIn = Math.max(0.01, T.puppeteer.phaseIntro.blend / T.puppeteer.phaseIntro.duration);
+    const cp = boss.cinematicProgress;
+    const k = clamp(Math.min(cp / bIn, 1, (1 - cp) / bIn), 0, 1);
+    camTarget = {
+      x: player.pos.x + (focus.x - player.pos.x) * k,
+      y: player.pos.y + (focus.y - player.pos.y) * k,
+    };
+    // 演出期間不做游標前瞻：鏡頭該看的是她，不是玩家的游標
+    camLook = scale(camLook, 1 - k);
+  }
+  camera.update(camTarget, camLook, rawDt);
   hud.update(rawDt, boss);
 
   render(plan);
@@ -494,54 +538,17 @@ function render(plan: SlashPlan): void {
 
   // 子彈時間：暗角 + 邊緣冷色
   const bt = clamp((1 - timeScale) / (1 - T.slash.bulletTimeScale), 0, 1);
-  if (bt > 0.01) {
-    const g = ctx.createRadialGradient(
-      viewW / 2,
-      viewH / 2,
-      Math.min(viewW, viewH) * 0.18,
-      viewW / 2,
-      viewH / 2,
-      Math.max(viewW, viewH) * 0.72,
-    );
-    g.addColorStop(0, 'rgba(10,14,30,0)');
-    g.addColorStop(1, `rgba(8,12,28,${0.62 * bt})`);
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, viewW, viewH);
-  }
+  bulletTimeVignette.draw(ctx, viewW, viewH, bt);
 
   // Boss 憤怒時，畫面邊緣持續泛紅——玩家不必看 UI 也感覺得到壓力
   if (boss.alive && boss.rage > 0) {
-    const k = boss.rageRatio * (0.55 + 0.45 * Math.sin(performance.now() / 420));
-    const g = ctx.createRadialGradient(
-      viewW / 2,
-      viewH / 2,
-      Math.min(viewW, viewH) * 0.36,
-      viewW / 2,
-      viewH / 2,
-      Math.max(viewW, viewH) * 0.75,
-    );
-    g.addColorStop(0, 'rgba(200,40,20,0)');
-    g.addColorStop(1, `rgba(200,40,20,${0.3 * k})`);
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, viewW, viewH);
+    rageVignette.draw(ctx, viewW, viewH, boss.rageRatio * (0.55 + 0.45 * Math.sin(performance.now() / 420)));
   }
 
   // 低血量的紅色警示邊框
   const hpRatio = player.hp / T.player.maxHp;
   if (player.alive && hpRatio < 0.35) {
-    const k = (1 - hpRatio / 0.35) * (0.5 + 0.5 * Math.sin(performance.now() / 260));
-    const g = ctx.createRadialGradient(
-      viewW / 2,
-      viewH / 2,
-      Math.min(viewW, viewH) * 0.3,
-      viewW / 2,
-      viewH / 2,
-      Math.max(viewW, viewH) * 0.7,
-    );
-    g.addColorStop(0, 'rgba(180,20,30,0)');
-    g.addColorStop(1, `rgba(180,20,30,${0.4 * k})`);
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, viewW, viewH);
+    lowHpVignette.draw(ctx, viewW, viewH, (1 - hpRatio / 0.35) * (0.5 + 0.5 * Math.sin(performance.now() / 260)));
   }
 
   hud.draw(ctx, viewW, viewH, player, boss, plan);

@@ -424,7 +424,8 @@ export const T = {
      */
     spin: {
       unlockPhase: 1,
-      telegraph: 0.4,
+      /** 拉長：預警要來得及從中心擴張到軌道半徑，玩家才讀得到「球會生在哪一圈」 */
+      telegraph: 0.7,
       ringRadius: 140,
       ringCount: 5,
       ringSpeed: 2.0,
@@ -471,7 +472,8 @@ export const T = {
      */
     center: {
       unlockPhase: 2,
-      telegraph: 0.5,
+      /** 同 spin：這招同時要讀推擠範圍和軌道半徑兩圈，給更長一點 */
+      telegraph: 0.8,
       pushDamage: 12,
       pushRadius: 260,
       ringRadius: 210,
@@ -483,6 +485,27 @@ export const T = {
       /** 每個公轉危險物的命中半徑 */
       hazardRadius: 24,
       recover: 0.8,
+    },
+
+    /**
+     * 進入最終階段（phase 2）的過場演出。
+     *
+     * 原本階段轉換是無聲無息的：玩家只會突然發現招式變多、傷害變高，
+     * 卻沒有任何一刻被告知「她進入最終型態了」。這段演出把那個瞬間變成事件——
+     * 鏡頭離開玩家、鎖到她身上，畫面持續震動，玩家完全無法操作，
+     * 結束後才接上原本的招式d（把玩家轟到外圍）。
+     */
+    phaseIntro: {
+      /** 演出總長；期間玩家無法移動也無法出刀 */
+      duration: 1.9,
+      /** 鏡頭從玩家移到她身上、演出結束再交還的過渡時間 */
+      blend: 0.45,
+      /** 持續震動的強度（每 shakeInterval 重新施加一次，維持整段都在抖） */
+      shakeMag: 16,
+      shakeInterval: 0.18,
+      /** 演出結尾的爆發：震動與衝擊環 */
+      burstShake: 34,
+      burstRadius: 420,
     },
 
     /**

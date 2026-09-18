@@ -22,7 +22,9 @@
  *  此時不分左右半屏，整個畫面就是一支滑鼠，讓既有的點擊判定原封不動可用。
  *
  * ── 蓄力取消 ────────────────────────────────────────────
- *  鍵鼠：放開左鍵時游標落在角色身上的取消區內即取消（判定在 slash.ts）。
+ *  鍵鼠：**按下滑鼠右鍵**直接取消目前這次蓄力（不出刀、不耗體力），
+ *        或放開左鍵時把游標收回角色身上的取消區內（判定在 slash.ts）。
+ *        右鍵是「不用把游標拉回來」的即時退出，瞄到一半發現時機不對時反應更快。
  *  觸控：拖曳距離太短（≈ 輕點）就落在取消區內，等同「點錯了不出刀」。
  */
 
@@ -73,6 +75,7 @@ export class Input {
   private chargeActive = false;
 
   private chargeReleasedEdge = false;
+  private chargeCancelledEdge = false;
   private keyPressedEdge = new Set<string>();
 
   constructor(canvas: HTMLCanvasElement) {
@@ -124,6 +127,12 @@ export class Input {
         this.chargeActive = true;
         this.chargeStartAt.x = this.mouse.x;
         this.chargeStartAt.y = this.mouse.y;
+      } else if (e.button === 2 && this.chargeActive) {
+        // 右鍵取消：結束蓄力但**不**發出 release 事件，所以不會出刀。
+        // leftDown 仍為 true——左鍵之後放開時 chargeActive 已是 false，不會補一刀；
+        // 要再蓄力必須重新按下左鍵。
+        this.chargeActive = false;
+        this.chargeCancelledEdge = true;
       }
     });
 
@@ -138,7 +147,7 @@ export class Input {
       }
     });
 
-    // 右鍵目前沒有綁定遊戲功能，但畫布上仍擋掉瀏覽器的右鍵選單，避免打斷遊戲
+    // 右鍵已綁定「取消蓄力」，右鍵選單一定要擋掉，否則每次取消都會跳出選單
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
     // ── 觸控 ────────────────────────────────────────────
@@ -233,6 +242,8 @@ export class Input {
   /** 強制清掉蓄力狀態（例如標題畫面按下的鍵可能還按著，別讓它一進場就變成蓄力） */
   resetCharge(): void {
     this.chargeActive = false;
+    this.chargeCancelledEdge = false;
+    this.chargeReleasedEdge = false;
     this.leftDown = false;
     // 把還按著的那根手指從追蹤中移除：它的 touchend 就不會再被當成一次出刀，
     // 玩家必須重新按下才會開始新的蓄力。
@@ -248,6 +259,13 @@ export class Input {
   consumeChargeRelease(): boolean {
     const r = this.chargeReleasedEdge;
     this.chargeReleasedEdge = false;
+    return r;
+  }
+
+  /** 取用「蓄力被右鍵取消」事件（觸控沒有對應操作，永遠是 false） */
+  consumeChargeCancel(): boolean {
+    const r = this.chargeCancelledEdge;
+    this.chargeCancelledEdge = false;
     return r;
   }
 

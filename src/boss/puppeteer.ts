@@ -68,6 +68,7 @@ export type PuppeteerState =
   | 'telegraphExecute'
   | 'executeActive'
   | 'executing'
+  | 'phaseIntro'
   | 'dead';
 
 /** 兩角度差，正規化到 -π..π（跟 guardian.ts/puppets.ts 各自獨立一份，避免跨檔互相依賴） */
@@ -105,6 +106,18 @@ export class Puppeteer {
   /** 招式c（全場穿越）用：這波場地是否已經灑出、給繪製用的走廊角度 */
   private gauntletFieldSpawned = false;
   private gauntletCorridors: number[] = [];
+  /**
+   * 旋轉環（招式d／招式e）的起始角度，**選招當下就鎖定**。
+   * 跟 `radialBaseAngle` 同一個原則（見 DEVLOG #016）：預警畫出來的每一顆球的位置，
+   * 就是等一下真的會生成的位置，不是等出招瞬間才重新隨機的裝飾。
+   */
+  private orbitBaseAngle = 0;
+
+  /** 最終階段過場：只播一次，跟終局處決一樣用「排定 → 下一幀強制打斷」的方式進入 */
+  private phaseIntroDone = false;
+  private phaseIntroPending = false;
+  /** 過場期間持續震動用的計時器 */
+  private phaseIntroShakeT = 0;
 
   /** 連續出招次數，達門檻進入一段明顯更長的破綻（見 finishAttack） */
   private attacksSinceOpening = 0;
@@ -154,6 +167,25 @@ export class Puppeteer {
     return this.phase / 2;
   }
 
+  /**
+   * 演出期間要鏡頭鎖定的世界座標；沒有演出時為 null（鏡頭照常跟玩家）。
+   * main.ts 讀這個值決定鏡頭跟誰。
+   */
+  get cinematicFocus(): Vec | null {
+    return this.state === 'phaseIntro' ? this.pos : null;
+  }
+
+  /** 演出期間玩家完全無法操作（不能走、不能瞄準、不能出刀） */
+  get inputLocked(): boolean {
+    return this.state === 'phaseIntro';
+  }
+
+  /** 過場演出的進度 0..1，給 main.ts 做鏡頭過渡用 */
+  get cinematicProgress(): number {
+    if (this.state !== 'phaseIntro') return 0;
+    return clamp(this.stateT / T.puppeteer.phaseIntro.duration, 0, 1);
+  }
+
   private get idleWait(): number {
     return T.puppeteer.idleTime * T.puppeteer.idleTimeMultByPhase[this.phase];
   }
@@ -178,7 +210,16 @@ export class Puppeteer {
 
     // 終局處決在鎖血的那一刻就排定了，這裡強制打斷她當下正在做的任何事——
     // 瀕死的最後一搏，不等目前招式播完
-    if (this.executePending) {
+    // 跨入最終階段的過場強制打斷當下動作——階段轉換要是一個「事件」，
+    // 不是等她把手上這招放完才不動聲色地換檔。
+    // 檢查順序在處決之前：一擊同時跨過兩道門檻時（很重的一斬），
+    // 先演完階段轉換，處決的 pending 會留到下一幀再接手，兩段演出不會互相蓋掉
+    if (this.phaseIntroPending) {
+      this.phaseIntroPending = false;
+      this.beginPhaseIntro(camera);
+    }
+
+    if (this.executePending && this.state !== 'phaseIntro') {
       this.executePending = false;
       this.beginExecuteSequence(camera);
     }
@@ -247,6 +288,10 @@ export class Puppeteer {
           this.puppets.clearHazards();
           this.finishAttack(T.puppeteer.center.recover);
         }
+        break;
+
+      case 'phaseIntro':
+        this.updatePhaseIntro(dt, camera);
         break;
 
       case 'telegraphExecute':
@@ -344,6 +389,7 @@ export class Puppeteer {
       if (this.phase === 2 && !this.centerIntroDone) {
         this.centerIntroDone = true;
         this.lastAttack = 'telegraphCenter';
+        this.orbitBaseAngle = Math.random() * Math.PI * 2;
         // 方向在選招當下就鎖定，整段預警不再轉向玩家
         this.snapFacing(player.pos);
         this.enter('telegraphCenter');
@@ -359,6 +405,9 @@ export class Puppeteer {
         // 放射狀路徑的角度也在選招當下鎖定，跟方向鎖定同一個原則：
         // 預警畫出來的就是最終結果，不是等出招瞬間才重新隨機
         if (next === 'telegraphRadial') this.radialBaseAngle = Math.random() * Math.PI * 2;
+        if (next === 'telegraphSpin' || next === 'telegraphCenter') {
+          this.orbitBaseAngle = Math.random() * Math.PI * 2;
+        }
         this.enter(next);
       }
     }
@@ -511,8 +560,9 @@ export class Puppeteer {
         cfg.ringSpeed,
         this.dmg(cfg.ringDamage),
         cfg.ringDuration,
-        Math.random() * Math.PI * 2,
+        this.orbitBaseAngle,
       );
+      this.orbitSpawnFx(cfg.ringRadius);
       this.enter('spinning');
     }
   }
@@ -606,8 +656,9 @@ export class Puppeteer {
         cfg.ringSpeed,
         this.dmg(cfg.ringDamage),
         cfg.ringDuration,
-        Math.random() * Math.PI * 2,
+        this.orbitBaseAngle,
       );
+      this.orbitSpawnFx(cfg.ringRadius);
       this.enter('centerActive');
     }
   }
@@ -622,6 +673,47 @@ export class Puppeteer {
     if (player.alive && dist(this.pos, player.pos) < cfg.pushRadius + T.player.radius) {
       const dir = norm(sub(player.pos, this.pos));
       player.takeDamage(this.dmg(cfg.pushDamage), dir.x === 0 && dir.y === 0 ? { x: 0, y: 1 } : dir);
+    }
+  }
+
+  // ── 最終階段過場（全場僅觸發一次）────────────────────────
+
+  /** 打斷目前狀態，清空場地，進入過場——玩家在這段期間完全無法動作 */
+  private beginPhaseIntro(camera: Camera): void {
+    const cfg = T.puppeteer.phaseIntro;
+    this.puppets.clear();
+    this.phaseIntroShakeT = 0;
+    camera.shake(cfg.shakeMag, cfg.shakeInterval * 1.4);
+    fx.flash(this.pos, 150, 0.35, [230, 170, 250]);
+    fx.ring(this.pos, { r0: 10, r1: 200, life: 0.45, width: 9, col: [220, 150, 245] });
+    this.enter('phaseIntro');
+  }
+
+  private updatePhaseIntro(dt: number, camera: Camera): void {
+    const cfg = T.puppeteer.phaseIntro;
+
+    // 持續震動：單次 shake 會自己衰減，所以固定間隔重新施加，整段都在抖
+    this.phaseIntroShakeT -= dt;
+    if (this.phaseIntroShakeT <= 0) {
+      this.phaseIntroShakeT = cfg.shakeInterval;
+      camera.shake(cfg.shakeMag, cfg.shakeInterval * 1.4);
+      fx.debris(this.pos, 5, { speed: 220, life: 0.55, radius: 34, gravity: 380 });
+      fx.spark(this.pos, 6, { speed: 190, life: 0.4, size: 2.6, col: [225, 170, 245] });
+    }
+
+    if (this.stateT >= cfg.duration) {
+      // 收尾的爆發，然後直接接上招式d：她跳到場中央、把玩家轟到外圍
+      camera.shake(cfg.burstShake, 0.6);
+      fx.ring(this.pos, { r0: 20, r1: cfg.burstRadius, life: 0.55, width: 14, col: [225, 160, 250], ground: true });
+      fx.ring(this.pos, { r0: 10, r1: cfg.burstRadius * 0.6, life: 0.4, width: 8, col: [240, 200, 255] });
+      fx.flash(this.pos, cfg.burstRadius * 0.4, 0.3, [230, 180, 250]);
+      fx.debris(this.pos, 22, { speed: 380, life: 0.7, radius: 24, gravity: 420 });
+
+      // 過場已經代替 updateIdle 完成了「最終階段一定先看到招式d」這件事
+      this.centerIntroDone = true;
+      this.lastAttack = 'telegraphCenter';
+      this.orbitBaseAngle = Math.random() * Math.PI * 2;
+      this.enter('telegraphCenter');
     }
   }
 
@@ -722,6 +814,10 @@ export class Puppeteer {
   tryHit(a: Vec, b: Vec, baseDamage: number, _playerPos: Vec): HitResult | null {
     if (!this.alive) return null;
 
+    // 過場演出期間玩家無法操作，她也就不該被判定命中——
+    // 否則演出開始前一刻放出、還在飛的那一斬會穿進演出裡打到她
+    if (this.state === 'phaseIntro') return null;
+
     const HR = T.slash.hitRadius;
     if (distPointSeg(this.pos, a, b) < T.puppeteer.radius + HR) {
       if (this.state === 'executeActive') {
@@ -764,6 +860,13 @@ export class Puppeteer {
       return;
     }
 
+    // 第一次跌進最終階段 → 排定下一幀播過場演出。
+    // 先於處決檢查：兩者在同一幀同時成立時（極重的一斬），先演階段轉換才合理
+    if (this.phase === 2 && !this.phaseIntroDone) {
+      this.phaseIntroDone = true;
+      this.phaseIntroPending = true;
+    }
+
     // 最終階段、血量跌到「階段內剩一半」→ 排定下一幀強制進入終局處決序列
     if (this.phase === 2 && this.hp / T.puppeteer.maxHp <= T.puppeteer.execute.triggerHpRatio) {
       this.executeTriggered = true;
@@ -786,6 +889,10 @@ export class Puppeteer {
     this.gauntletCorridors = [];
     this.attacksSinceOpening = 0;
     this.centerIntroDone = false;
+    this.orbitBaseAngle = 0;
+    this.phaseIntroDone = false;
+    this.phaseIntroPending = false;
+    this.phaseIntroShakeT = 0;
     this.executeTriggered = false;
     this.executePending = false;
     this.executePath = [];
@@ -819,8 +926,9 @@ export class Puppeteer {
         break;
       }
       case 'telegraphSpin': {
-        const p = clamp(this.stateT / T.puppeteer.spin.telegraph, 0, 1);
-        this.ringTelegraph(ctx, this.pos, T.puppeteer.spin.ringRadius, p);
+        const cfg = T.puppeteer.spin;
+        const p = clamp(this.stateT / cfg.telegraph, 0, 1);
+        this.orbitTelegraph(ctx, cfg.ringRadius, cfg.ringCount, p);
         break;
       }
       case 'gauntletActive': {
@@ -831,8 +939,11 @@ export class Puppeteer {
         break;
       }
       case 'telegraphCenter': {
-        const p = clamp(this.stateT / T.puppeteer.center.telegraph, 0, 1);
-        this.ringTelegraph(ctx, this.pos, T.puppeteer.center.pushRadius, p);
+        const cfg = T.puppeteer.center;
+        const p = clamp(this.stateT / cfg.telegraph, 0, 1);
+        // 兩圈都要畫：外面那圈是會把玩家推開的範圍，裡面那圈是球會出現的軌道
+        this.ringTelegraph(ctx, this.pos, cfg.pushRadius, p);
+        this.orbitTelegraph(ctx, cfg.ringRadius, cfg.ringCount, p);
         break;
       }
       case 'telegraphExecute': {
@@ -840,6 +951,9 @@ export class Puppeteer {
         this.ringTelegraph(ctx, this.pos, 300, p);
         break;
       }
+      case 'phaseIntro':
+        this.phaseIntroTelegraph(ctx);
+        break;
       case 'executeActive':
       case 'executing':
         this.executeFieldTelegraph(ctx);
@@ -907,6 +1021,91 @@ export class Puppeteer {
     ctx.fillStyle = `rgba(180,120,205,${0.08 + p * 0.16})`;
     ctx.beginPath();
     ctx.arc(at.x, at.y, radius * p, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /**
+   * 旋轉環（招式d／招式e）的預警：一圈能量從她身上**向外擴張**到最終軌道半徑。
+   *
+   * 原本只有一個淡淡的填色圓在長大，在滿場特效裡幾乎看不見，
+   * 玩家等於是被無預警生成的球撞到。現在畫三樣東西：
+   *  1. 最終軌道的虛線圈——一開始就畫滿，告訴玩家「危險會停在這個半徑」
+   *  2. 一道明亮的擴張波前，從中心衝到那個半徑，指出「正在成形，還有多久」
+   *  3. 每顆球的預定位置（用選招當下鎖定的 `orbitBaseAngle` 算），隨波前抵達才浮現
+   */
+  private orbitTelegraph(ctx: CanvasRenderingContext2D, radius: number, count: number, p: number): void {
+    const { x, y } = this.pos;
+    // 先快後慢：波前一出手就衝出去，最後貼著目標半徑收住，讀起來像「充能完成」
+    const e = 1 - Math.pow(1 - p, 2.2);
+    const front = radius * e;
+
+    // 1) 最終軌道：虛線圈，全程可見
+    ctx.save();
+    ctx.setLineDash([10, 9]);
+    ctx.strokeStyle = `rgba(200,140,220,${0.3 + p * 0.45})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    // 2) 擴張中的能量盤與波前
+    ctx.fillStyle = `rgba(180,120,205,${0.05 + p * 0.13})`;
+    ctx.beginPath();
+    ctx.arc(x, y, front, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = `rgba(235,190,250,${0.45 + p * 0.5})`;
+    ctx.lineWidth = 3 + p * 3;
+    ctx.beginPath();
+    ctx.arc(x, y, Math.max(1, front), 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 3) 每顆球的預定位置：波前掃過去之後才浮現，越接近出招越實心
+    const dotAlpha = clamp((p - 0.35) / 0.65, 0, 1);
+    if (dotAlpha > 0) {
+      ctx.fillStyle = `rgba(235,200,250,${dotAlpha * 0.8})`;
+      for (let i = 0; i < count; i++) {
+        const a = this.orbitBaseAngle + (i / count) * Math.PI * 2;
+        ctx.beginPath();
+        ctx.arc(x + Math.cos(a) * radius, y + Math.sin(a) * radius, 5 + dotAlpha * 7, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  /** 旋轉環正式生成那一刻：一圈實體衝擊環從中心炸到軌道半徑，收掉預警的擴張動作 */
+  private orbitSpawnFx(radius: number): void {
+    fx.ring(this.pos, { r0: 8, r1: radius, life: 0.3, width: 7, col: [225, 175, 245], ground: true });
+    fx.ring(this.pos, { r0: radius * 0.85, r1: radius, life: 0.36, width: 4, col: [235, 200, 250] });
+    fx.spark(this.pos, 16, { speed: 300, life: 0.34, size: 2.6, col: [225, 180, 245] });
+    fx.flash(this.pos, radius * 0.55, 0.22, [215, 165, 240]);
+  }
+
+  /**
+   * 最終階段過場的地面演出：一圈圈能量從她腳下向外脈動。
+   * 鏡頭這時已經鎖在她身上，畫面又在震——地面要有東西在動，
+   * 玩家才知道這幾秒不是當機，是她在轉型態。
+   */
+  private phaseIntroTelegraph(ctx: CanvasRenderingContext2D): void {
+    const cfg = T.puppeteer.phaseIntro;
+    const p = clamp(this.stateT / cfg.duration, 0, 1);
+
+    // 三圈錯開相位的脈動環，越接近結尾擴得越大越亮
+    for (let i = 0; i < 3; i++) {
+      const q = (this.stateT * 1.15 + i / 3) % 1;
+      const r = 40 + q * (cfg.burstRadius * 0.55) * (0.5 + p * 0.5);
+      ctx.strokeStyle = `rgba(215,150,245,${(1 - q) * (0.25 + p * 0.45)})`;
+      ctx.lineWidth = 3 + (1 - q) * 4;
+      ctx.beginPath();
+      ctx.arc(this.pos.x, this.pos.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // 腳下持續變亮的能量盤
+    ctx.fillStyle = `rgba(180,110,210,${0.08 + p * 0.22})`;
+    ctx.beginPath();
+    ctx.arc(this.pos.x, this.pos.y, T.puppeteer.radius * (1.6 + p * 1.4), 0, Math.PI * 2);
     ctx.fill();
   }
 
